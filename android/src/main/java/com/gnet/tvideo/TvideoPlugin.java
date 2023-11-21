@@ -9,9 +9,13 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
+import io.flutter.plugin.platform.PlatformViewRegistry;
 import io.flutter.view.TextureRegistry;
 
 import android.graphics.SurfaceTexture;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
@@ -39,23 +43,21 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
     private Surface stagingSurface = null;
     private MediaFormat format = null;
     private MediaCodec codec = null;
+    private AudioTrack audioTrack = null;
+    private byte[] audioBuffer;
     private byte[] stagingData = null;
     private boolean firstPlay = false;
-    private long timestamp = 0;
     private int width = 0;
     private int height = 0;
-    private int fps = 0;
-    private boolean hevc = false;
+    TextureRegistry tr;
+    TextureRegistry.SurfaceTextureEntry ste;
 
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
         channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "tvideo");
         channel.setMethodCallHandler(this);
 
-        TextureRegistry tr = flutterPluginBinding.getTextureRegistry();
-        TextureRegistry.SurfaceTextureEntry ste = tr.createSurfaceTexture();
-        stagingTextureID = ste.id();
-        stagingSurface = new Surface(ste.surfaceTexture());
+        tr = flutterPluginBinding.getTextureRegistry();
     }
 
     @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
@@ -65,22 +67,27 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
 
             result.success("Android: " + android.os.Build.VERSION.RELEASE);
         } else if (call.method.equals("createCodec")) {
-            width = call.argument("width");
-            height = call.argument("height");
-            fps = call.argument("codecNumber");
             byte[] byteData = call.argument("data");
 
             int res = createNewCodec(
-                    call.argument("width"),
-                    call.argument("height"),
-                    call.argument("codecNumber"),
-                    call.argument("data")
+                call.argument("width"),
+                call.argument("height"),
+                byteData
             );
 
+            setStagingData(byteData);
+
+            decodeAndPlay();
+
+            result.success(res);
         } else if (call.method.equals("getTextureId")) {
             if (stagingTextureID == -1) {
-                result.error("error", "stagingTextureID: " + stagingTextureID, null);
-                return;
+                ste = tr.createSurfaceTexture();
+
+                stagingTextureID = ste.id();
+                android.util.Log.d("tvideo", "stagingTextureID: " + stagingTextureID);
+
+                stagingSurface = new Surface(ste.surfaceTexture());
             }
 
             result.success(stagingTextureID);
@@ -89,7 +96,9 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
             byte[] byteData = call.argument("data");
 
             setStagingData(byteData);
-            Log.i("tvideo", "Receivec data, len: " + byteData.length);
+            Log.i("tvideo", "Received data, len: " + byteData.length);
+
+            decodeAndPlay();
 
             result.success(0);
         } else if (call.method.equals("release")) {
@@ -111,29 +120,26 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
         channel.setMethodCallHandler(null);
     }
 
-
     void setStagingData(byte[] data) {
-        synchronized (stagingData) {
+        //synchronized (stagingData) {
             stagingData = data;
-        }
+        //}
     }
 
     void reset() {
-        width = height = fps = 0;
-        hevc = false;
+        width = height = 0;
         format = null;
         codec = null;
     }
 
-    int createNewCodec(int width, int height, int fps, byte[] data) {
-        if (width <= 0 || height <= 0 || fps == 0 || data.length == 0)
+    int createNewCodec(int width, int height, byte[] data) {
+        if (width <= 0 || height <= 0 || data.length == 0)
             return -1;
 
         reset();
 
         this.width = width;
         this.height = height;
-        this.fps = fps;
 
         String codecString;
 
@@ -147,77 +153,105 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
 
         format = MediaFormat.createVideoFormat(codecString, width, height);
 
-        if (hevc)
-            codecString = MediaFormat.MIMETYPE_VIDEO_HEVC;
-
         try {
             codec = MediaCodec.createDecoderByType(codecString);
-
-            if (codec != null) {
-                codec.setCallback(new MediaCodec.Callback() {
-                    @Override
-                    public void onInputBufferAvailable(@NonNull MediaCodec mediaCodec, int i) {
-                        if (stagingData == null || stagingData.length == 0)
-                            mediaCodec.queueInputBuffer(i, 0, 0, 0, 0);
-
-                        ByteBuffer bb = mediaCodec.getInputBuffer(i);
-                        bb.clear();
-                        bb.put(stagingData);
-
-                        mediaCodec.queueInputBuffer(i, 0, stagingData.length, 0, 0);
-                    }
-
-                    @Override
-                    public void onOutputBufferAvailable(@NonNull MediaCodec mediaCodec, int i, @NonNull MediaCodec.BufferInfo bufferInfo) {
-                        if (firstPlay) {
-                            timestamp = System.nanoTime();
-                            timestamp += 33333333;// 33.333333 ms => ;
-
-                            firstPlay = false;
-                        } else
-                            timestamp += 33333333;
-
-                        mediaCodec.releaseOutputBuffer(i, timestamp);
-                    }
-
-                    @Override
-                    public void onError(@NonNull MediaCodec mediaCodec, @NonNull MediaCodec.CodecException e) {
-                        android.util.Log.e("motrex_bb", "MediaCodec::onError " + e.getMessage());
-                    }
-
-                    @Override
-                    public void onOutputFormatChanged(@NonNull MediaCodec mediaCodec, @NonNull MediaFormat mediaFormat) {
-                        android.util.Log.i("motrex_bb", mediaFormat.toString());
-                    }
-                });
-            }
+//            if (codec != null) {
+//                codec.setCallback(new MediaCodec.Callback() {
+//                    @Override
+//                    public void onInputBufferAvailable(@NonNull MediaCodec mediaCodec, int i) {
+//                        if (stagingData == null || stagingData.length == 0)
+//                            mediaCodec.queueInputBuffer(i, 0, 0, 0, 0);
+//
+//                        ByteBuffer bb = mediaCodec.getInputBuffer(i);
+//                        bb.clear();
+//                        bb.put(stagingData);
+//
+//                        mediaCodec.queueInputBuffer(i, 0, stagingData.length, 0, 0);
+//                    }
+//
+//                    @Override
+//                    public void onOutputBufferAvailable(@NonNull MediaCodec mediaCodec, int i, @NonNull MediaCodec.BufferInfo bufferInfo) {
+//
+//                        mediaCodec.releaseOutputBuffer(i, true);
+//                    }
+//
+//                    @Override
+//                    public void onError(@NonNull MediaCodec mediaCodec, @NonNull MediaCodec.CodecException e) {
+//                        android.util.Log.e("motrex_bb", "MediaCodec::onError " + e.getMessage());
+//                    }
+//
+//                    @Override
+//                    public void onOutputFormatChanged(@NonNull MediaCodec mediaCodec, @NonNull MediaFormat mediaFormat) {
+//                        android.util.Log.i("motrex_bb", mediaFormat.toString());
+//                    }
+//                });
+//            }
         } catch (IOException e) {
-            //result.error("-1","Fail to init codec", null);
-            //throw new RuntimeException(e);
             format = format = null;
             return -2;
         }
 
         format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
-        codec.configure(format, stagingSurface, null, 0);
-        //codec.start();
 
+        codec.configure(format, stagingSurface, null, 0);
+        codec.start();
+//        int bufsize = AudioTrack.getMinBufferSize(8000,
+//                AudioFormat.CHANNEL_OUT_STEREO,
+//                AudioFormat.ENCODING_PCM_16BIT);
+//
+//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+//            audioTrack = new AudioTrack.Builder()
+//                    .setAudioAttributes(new AudioAttributes.Builder()
+//                            .setUsage(AudioAttributes.USAGE_MEDIA)
+//                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+//                            .build())
+//                    .setAudioFormat(new AudioFormat.Builder()
+//                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+//                            .setSampleRate(8000)
+//                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+//                            .build())
+//                    .setBufferSizeInBytes(bufsize)
+//                    .build();
+//        }
+//
+//        audioTrack.play();
+//        audioBuffer = new byte[4096];
         return 0;
     }
 
+    synchronized int decodeAndPlay()
+    {
+        int inputBufferId = codec.dequeueInputBuffer(-1);
+        if (inputBufferId >= 0) {
+            ByteBuffer inputBuffer = codec.getInputBuffer(inputBufferId);
+            inputBuffer.clear();
+            inputBuffer.put(stagingData);
+            android.util.Log.d("tvideo", "decodeAndPlay: queueInputBuffer");
 
+            codec.queueInputBuffer(inputBufferId, 0, stagingData.length, System.nanoTime() / 1000, 0);
+        }
 
+        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        int outputBufferId = codec.dequeueOutputBuffer(bufferInfo, -1);
+        if (outputBufferId >= 0) {
+            android.util.Log.d("tvideo", "decodeAndPlay: releaseOutputBuffer");
+            codec.releaseOutputBuffer(outputBufferId, true);
+        }
 
-
+        return 0;
+    }
 
     /**
      * Returns the first codec capable of encoding the specified MIME type, or
      * null if no match was found.
      */
     private MediaCodecInfo selectCodec(String mimeType) {
-        int numCodecs = MediaCodecList.getCodecCount();
-        for (int i = 0; i < numCodecs; i++) {
-            MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(i);
+
+        MediaCodecList mcl = new MediaCodecList(MediaCodecList.ALL_CODECS);
+        MediaCodecInfo[] mci = mcl.getCodecInfos();
+
+        for (int i = 0; i < mci.length; i++) {
+            MediaCodecInfo codecInfo = mci[i];
 
             if (!codecInfo.isEncoder()) {
                 continue;
@@ -230,6 +264,22 @@ public class TvideoPlugin implements FlutterPlugin, MethodCallHandler {
                 }
             }
         }
+
+//       int numCodecs = MediaCodecList.getCodecCount();
+//        for (int i = 0; i < numCodecs; i++) {
+//            MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(i);
+//
+//            if (!codecInfo.isEncoder()) {
+//                continue;
+//            }
+//
+//            for (String type : codecInfo.getSupportedTypes()) {
+//                if (type.equalsIgnoreCase(mimeType)) {
+//                    Log.i("selectCodec", "SelectCodec : " + codecInfo.getName());
+//                    return codecInfo;
+//                }
+//            }
+//        }
         return null;
     }
 

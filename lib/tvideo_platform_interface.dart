@@ -45,7 +45,7 @@ abstract class TvideoPlatform extends PlatformInterface {
     throw UnimplementedError('release() has not been implemented.');
   }
 
-  Future<bool?> isCodecInitialized(int width, int height, bool hevc) {
+  Future<bool?> isCodecInitialized() {
     throw UnimplementedError('isCodecInitialized() has not been implemented.');
   }
 }

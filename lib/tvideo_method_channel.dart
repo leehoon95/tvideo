@@ -31,12 +31,13 @@ class MethodChannelTvideo extends TvideoPlatform {
 
   @override
   Future<int?> putData(Uint8List data) async {
-    final res = await methodChannel.invokeMethod<int>('putData', data);
+    final res = await methodChannel
+        .invokeMethod<int>('putData', <String, dynamic>{'data': data});
     return res;
   }
 
   @override
-  Future<bool?> isCodecInitialized(int width, int height, bool hevc) async {
+  Future<bool?> isCodecInitialized() async {
     final res = await methodChannel.invokeMethod<bool>('isCodecInitialized');
     return res;
   }

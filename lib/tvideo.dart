@@ -22,7 +22,7 @@ class Tvideo {
     return TvideoPlatform.instance.release();
   }
 
-  static Future<bool?> isCodecInitialized(int width, int height, bool hevc) {
-    return TvideoPlatform.instance.isCodecInitialized(width, height, hevc);
+  static Future<bool?> isCodecInitialized() {
+    return TvideoPlatform.instance.isCodecInitialized();
   }
 }
